@@ -57,8 +57,10 @@ graph TD
     S -- Nem --> U;
     U --> V[End];
 ```
+
 ## Fájlstruktúra
 
+```
 .
 ├── config/
 │   └── constants.py         # Központi konfigurációs fájl
@@ -74,3 +76,4 @@ graph TD
 ├── main.py                  # A program indítófájlja
 ├── .env                     # API kulcs és egyéb környezeti változók helye
 └── requirements.txt         # Szükséges Python csomagok listája
+```
