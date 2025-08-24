@@ -18,14 +18,11 @@ async def prepare_data_for_training_async(labeled_data: List[Dict]) -> (np.ndarr
     and structuring the scores as a numpy array, asynchronously.
     """
     texts = [item['text'] for item in labeled_data]
-    
     topic_labels = sorted(labeled_data[0]['scores'].keys())
-    
     score_vectors = []
     for item in labeled_data:
         ordered_scores = [item['scores'][label] for label in topic_labels]
         score_vectors.append(ordered_scores)
-    
     y_data = np.array(score_vectors)
 
     print(f"Generating embeddings for {len(texts)} paragraphs...")
@@ -45,16 +42,18 @@ def build_and_train_model(X_train, y_train, X_val, y_val, output_labels: List[st
     input_shape = (X_train.shape[1],)
     output_shape = y_train.shape[1]
 
+    # --- MÓDOSÍTVA: ÚJ, BÕVÍTETT MODELL ARCHITEKTÚRA ---
     model = tf.keras.Sequential([
         tf.keras.layers.InputLayer(input_shape=input_shape),
-        tf.keras.layers.Dense(256, activation='relu'),
+        tf.keras.layers.Dense(512, activation='relu'),
+        tf.keras.layers.Dropout(0.4),
+        tf.keras.layers.Dense(256, activation='relu'), # Extra réteg
         tf.keras.layers.Dropout(0.3),
         tf.keras.layers.Dense(128, activation='relu'),
         tf.keras.layers.Dense(output_shape, activation='sigmoid')
     ])
 
     model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
-    
     model.summary()
     
     print("\nStarting model training...")

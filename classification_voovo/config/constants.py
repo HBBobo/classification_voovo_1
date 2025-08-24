@@ -29,7 +29,7 @@ EMBEDDING_MODEL = 'gemini-embedding-001'
 
 
 # Active learning pipeline thresholds
-CONFIDENCE_THRESHOLD = 0.85  # If NN's top score is below this, ask the Oracle.
+CONFIDENCE_THRESHOLD = 0.8   # If NN's top score is below this, ask the Oracle.
 RETRAIN_TRIGGER_COUNT = 25   # Retrain the model every time we collect this many new labels.
 
 
