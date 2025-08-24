@@ -30,12 +30,12 @@ graph TD
     F -- Nem --> G[Hozzáadás az Oracle Várólistához];
 
     F -- Igen --> H[Predikció a Student modellel];
-    H --> I{A Student magabiztos? (>= 0.85)};
+    H --> I{"A Student magabiztos? (>= 0.85)"};
     I -- Igen --> J[Student pontszámainak használata];
     J --> Z;
     I -- Nem --> G;
 
-    G --> K{Várólista mérete >= 25?};
+    G --> K{"Várólista mérete >= 25?"};
     K -- Nem --> Z;
 
     K -- Igen --> L subgraph Batch Feldolgozás és Tanítás
