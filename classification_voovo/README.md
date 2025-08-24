@@ -38,7 +38,9 @@ graph TD
     G --> K{"Várólista mérete >= 25?"};
     K -- Nem --> Z;
 
-    K -- Igen --> L subgraph Batch Feldolgozás és Tanítás
+    K -- Igen --> L;
+    
+    subgraph L [Batch Feldolgozás és Tanítás]
         M[Párhuzamos API hívás a 25 bekezdésre]
         M --> N[Új címkék mentése a Cache-be]
         N --> O[Teljes Cache betöltése]
