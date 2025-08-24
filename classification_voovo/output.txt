@@ -1,0 +1,985 @@
+--- File Structure ---
+config/
+  __main__.py
+  constants.py
+main.py
+utils/
+  __main__.py
+  active_learning_pipeline.py
+  create_training_data.py
+  find_best_match.py
+  generate_embeddings.py
+  paragraph_splitter.py
+  train_student_model.py
+  universal_parser.py
+
+--- File Contents ---
+
+## config\__main__.py ##
+
+
+## config\constants.py ##
+import os
+
+# --- DIRECTORIES AND FILE PATHS ---
+
+# Base directories
+DATA_DIR = "data"
+MODELS_DIR = "models"
+INPUT_DOCUMENT_FOLDER = os.path.join(DATA_DIR, "content")
+
+# Data and result files
+TOPICS_FILE_PATH = os.path.join(DATA_DIR, "main_topics_subtopics.json")
+ORACLE_CACHE_PATH = os.path.join(DATA_DIR, "oracle_scores_cache.json")
+FINAL_RESULTS_PATH = os.path.join(DATA_DIR, "final_classified_results.json")
+TRAINING_DATASET_PATH = os.path.join(DATA_DIR, "training_dataset_universal_scores.json")
+
+# Model files
+STUDENT_MODEL_FILENAME = "paragraph_classifier.h5"
+STUDENT_MODEL_LABELS_FILENAME = "model_labels.json"
+STUDENT_MODEL_PATH = os.path.join(MODELS_DIR, STUDENT_MODEL_FILENAME)
+STUDENT_MODEL_LABELS_PATH = os.path.join(MODELS_DIR, STUDENT_MODEL_LABELS_FILENAME)
+
+
+# --- MODEL AND PIPELINE PARAMETERS ---
+
+# Gemini model identifiers
+ORACLE_MODEL = 'gemini-2.5-pro'
+PARAGRAPH_SPLITTER_MODEL = 'gemini-2.5-flash-lite'
+EMBEDDING_MODEL = 'gemini-embedding-001'
+
+
+# Active learning pipeline thresholds
+CONFIDENCE_THRESHOLD = 0.85  # If NN's top score is below this, ask the Oracle.
+RETRAIN_TRIGGER_COUNT = 25   # Retrain the model every time we collect this many new labels.
+
+
+# --- EMBEDDING SETTINGS ---
+
+# The task type provided to the embedding model. This can influence the quality of the vector.
+# Possible values: "CLASSIFICATION", "RETRIEVAL_DOCUMENT", "CLUSTERING", "SEMANTIC_SIMILIRITY"
+
+# Task type used for training and retraining the model.
+EMBEDDING_TASK_FOR_TRAINING = "CLASSIFICATION"
+
+# Task type used for processing a single paragraph during the pipeline's run (inference).
+EMBEDDING_TASK_FOR_INFERENCE = "CLASSIFICATION"
+
+## main.py ##
+from utils.active_learning_pipeline import run_pipeline
+import os
+
+def main():
+    print("=============================================")
+    print("  Document Classification - Active Learning  ")
+    print("=============================================")
+    
+    if not os.getenv("GOOGLE_API_KEY"):
+        print("\nError: no API key found")
+        return
+
+    try:
+        run_pipeline()
+    except Exception as e:
+        print(f"\nError: {e}")
+
+if __name__ == "__main__":
+    main()
+
+## utils\__main__.py ##
+
+
+## utils\active_learning_pipeline.py ##
+import os
+import glob
+import json
+import numpy as np
+import random
+import time
+from typing import List, Dict, Any, Tuple, Optional
+
+# --- Component Imports ---
+from utils.universal_parser import extract_paragraphs_from_file
+from utils.create_training_data import score_paragraph_universally as get_scores_from_oracle
+from utils.create_training_data import load_cache as load_oracle_cache
+from utils.create_training_data import save_cache as save_oracle_cache
+
+from dotenv import load_dotenv
+
+# --- Project-wide Constants ---
+from config import constants
+
+load_dotenv()
+
+
+def load_student_nn_model_and_labels() -> Tuple[Optional[Any], Optional[List[str]]]:
+    """Loads a trained Keras model and its labels if they exist."""
+    try:
+        import tensorflow as tf
+    except ImportError:
+        print("Warning: TensorFlow is not installed. The system will rely solely on the Oracle.")
+        return None, None
+        
+    if not os.path.exists(constants.STUDENT_MODEL_PATH) or not os.path.exists(constants.STUDENT_MODEL_LABELS_PATH):
+        print("Warning: Trained student model or labels not found. System will start in Oracle-only mode.")
+        return None, None
+    
+    print(f"-> Loading trained student model from '{constants.STUDENT_MODEL_PATH}'...")
+    model = tf.keras.models.load_model(constants.STUDENT_MODEL_PATH)
+    with open(constants.STUDENT_MODEL_LABELS_PATH, 'r', encoding='utf-8') as f:
+        labels = json.load(f)
+    return model, labels
+
+def retrain_student_model() -> Tuple[Optional[Any], Optional[List[str]]]:
+    """
+    Combines new labels with the full cached dataset and retrains the NN.
+    This function encapsulates the logic of the 'train_student_model.py' script.
+    """
+    try:
+        import tensorflow as tf
+        from sklearn.model_selection import train_test_split
+    except ImportError:
+        print("Error: TensorFlow or Scikit-learn not installed. Cannot retrain model.")
+        return None, None
+    
+    full_dataset_dict = load_oracle_cache(constants.ORACLE_CACHE_PATH)
+    if not full_dataset_dict or len(full_dataset_dict) < constants.RETRAIN_TRIGGER_COUNT:
+        print(f"Retraining skipped: Not enough samples in Oracle cache ({len(full_dataset_dict)}).")
+        return None, None
+    
+    full_dataset = list(full_dataset_dict.values())
+    print(f"\n--- Retraining Triggered! Total training samples: {len(full_dataset)} ---")
+
+    texts = [item['text'] for item in full_dataset]
+    topic_labels = sorted(full_dataset[0]['scores'].keys())
+    y_data = np.array([[item['scores'].get(label, 0.0) for label in topic_labels] for item in full_dataset])
+    
+    print("Generating embeddings for the full dataset...")
+    embedding_result = genai.embed_content(
+        model=constants.EMBEDDING_MODEL, 
+        content=texts, 
+        task_type=constants.EMBEDDING_TASK_FOR_TRAINING
+    )
+    X_data = np.array(embedding_result['embedding'])
+
+    X_train, X_val, y_train, y_val = train_test_split(X_data, y_data, test_size=0.2, random_state=42)
+    
+    model = tf.keras.Sequential([
+        tf.keras.layers.InputLayer(input_shape=(X_train.shape[1],)),
+        tf.keras.layers.Dense(256, activation='relu'),
+        tf.keras.layers.Dropout(0.3),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dense(y_train.shape[1], activation='sigmoid')
+    ])
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    
+    print("Starting retraining...")
+    model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=50, batch_size=32,
+              callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)],
+              verbose=0)
+
+    os.makedirs(constants.MODELS_DIR, exist_ok=True)
+    print(f"Retraining complete. Saving new model to '{constants.STUDENT_MODEL_PATH}'...")
+    model.save(constants.STUDENT_MODEL_PATH)
+    with open(constants.STUDENT_MODEL_LABELS_PATH, 'w', encoding='utf-8') as f:
+        json.dump(topic_labels, f)
+
+    print("--- Resuming main pipeline with the new, smarter model. ---\n")
+    return model, topic_labels
+
+def generate_single_embedding(text: str) -> Optional[np.ndarray]:
+    """Generates an embedding for a single piece of text."""
+    try:
+        result = genai.embed_content(
+            model=constants.EMBEDDING_MODEL, 
+            content=text, 
+            task_type=constants.EMBEDDING_TASK_FOR_INFERENCE
+        )
+        return np.array(result['embedding'])
+    except Exception as e:
+        print(f"    -> Error generating embedding: {e}")
+        return None
+
+def predict_with_student_nn(model: Any, paragraph_embedding: np.ndarray, model_labels: List[str]) -> Dict[str, float]:
+    """Makes a prediction with our fast, local neural network."""
+    scores_vector = model.predict(np.expand_dims(paragraph_embedding, axis=0), verbose=0)[0]
+    return {label: float(score) for label, score in zip(model_labels, scores_vector)}
+
+def run_pipeline():
+    """
+    The main function that runs the entire active learning pipeline.
+    """
+    import google.generativeai as genai
+    print("--- Starting Active Learning Pipeline ---")
+    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
+    student_model, model_labels = load_student_nn_model_and_labels()
+    oracle_cache = load_oracle_cache(constants.ORACLE_CACHE_PATH)
+    with open(constants.TOPICS_FILE_PATH, 'r', encoding='utf-8') as f:
+        all_topics_json = json.load(f)['topics']
+
+    print(f"\nAggregating all paragraphs from folder: '{constants.INPUT_DOCUMENT_FOLDER}'...")
+    all_paragraphs_with_origin = []
+    files_to_process = glob.glob(f"{constants.INPUT_DOCUMENT_FOLDER}/*")
+    
+    for file_path in files_to_process:
+        paragraphs = extract_paragraphs_from_file(file_path)
+        for p in paragraphs:
+            all_paragraphs_with_origin.append({"text": p, "origin_file": os.path.basename(file_path)})
+    
+    if not all_paragraphs_with_origin:
+        exit("No paragraphs found in any documents. Exiting.")
+
+    print(f"Found a total of {len(all_paragraphs_with_origin)} paragraphs. Shuffling...")
+    random.shuffle(all_paragraphs_with_origin)
+
+    final_results = []
+    newly_collected_labels_for_retraining = []
+    oracle_call_count = 0
+
+    for i, para_info in enumerate(all_paragraphs_with_origin):
+        para_text = para_info["text"]
+        origin = para_info["origin_file"]
+        print(f"\nProcessing paragraph {i+1}/{len(all_paragraphs_with_origin)} (from {origin})...")
+        
+        use_oracle = True
+        final_scores = {}
+        
+        if student_model and model_labels:
+            para_embedding = generate_single_embedding(para_text)
+            if para_embedding is not None:
+                student_scores = predict_with_student_nn(student_model, para_embedding, model_labels)
+                confidence = np.max(list(student_scores.values()))
+                
+                if confidence >= constants.CONFIDENCE_THRESHOLD:
+                    use_oracle = False
+                    final_scores = student_scores
+                    print(f"  -> [NN] High Confidence ({confidence:.2f}). Using Student's scores.")
+
+        if use_oracle:
+            if not student_model: print("  -> [ORACLE] No student model. Escalating...")
+            else: print(f"  -> [ORACLE] Low Confidence. Escalating to Gemini...")
+            
+            oracle_call_count += 1
+            
+            if para_text in oracle_cache:
+                print("    -> Oracle Cache HIT.")
+                final_scores = oracle_cache[para_text]['scores']
+            else:
+                print("    -> Oracle Cache MISS. Calling API...")
+                oracle_result = get_scores_from_oracle(para_text, all_topics_json)
+                final_scores = oracle_result.get("scores", {})
+                
+                if final_scores:
+                    new_label = {"text": para_text, "scores": final_scores}
+                    oracle_cache[para_text] = new_label
+                    newly_collected_labels_for_retraining.append(new_label)
+                    save_oracle_cache(constants.ORACLE_CACHE_PATH, oracle_cache)
+                    print("    -> Saved new label to Oracle cache.")
+
+        final_results.append({"file": origin, "text": para_text, "scores": final_scores})
+
+        if len(newly_collected_labels_for_retraining) >= constants.RETRAIN_TRIGGER_COUNT:
+            new_model, new_labels = retrain_student_model()
+            if new_model:
+                student_model = new_model
+                model_labels = new_labels
+            newly_collected_labels_for_retraining = []
+
+    print("\n--- Pipeline Complete ---")
+    print(f"Processed {len(files_to_process)} files and {len(final_results)} paragraphs.")
+    print(f"The Oracle (Gemini API) was called {oracle_call_count} times.")
+
+    print(f"Saving final classified results to '{constants.FINAL_RESULTS_PATH}'...")
+    os.makedirs(os.path.dirname(constants.FINAL_RESULTS_PATH), exist_ok=True)
+    with open(constants.FINAL_RESULTS_PATH, 'w', encoding='utf-8') as f:
+        json.dump(final_results, f, ensure_ascii=False, indent=4)
+
+    print("\nProcess finished.")
+
+if __name__ == "__main__":
+    run_pipeline()
+
+## utils\create_training_data.py ##
+﻿import json
+import google.generativeai as genai
+from typing import List, Dict
+import os
+import time
+from dotenv import load_dotenv
+
+from utils.paragraph_splitter import get_raw_text_from_pdf, split_text_into_paragraphs_with_gemini
+from config import constants
+
+load_dotenv()
+
+def load_cache(cache_path: str) -> Dict:
+    """Loads the scored paragraphs cache file."""
+    if not os.path.exists(cache_path):
+        return {}
+    try:
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            # This logic assumes the saved format is a list of dicts
+            return {item['text']: item for item in data}
+    except (json.JSONDecodeError, IOError):
+        print(f"Warning: Could not read or decode cache file at {cache_path}. Starting fresh.")
+        return {}
+
+def save_cache(cache_path: str, cache_data: Dict):
+    """Saves the cache data to the specified file."""
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        json.dump(list(cache_data.values()), f, ensure_ascii=False, indent=4)
+
+def score_paragraph_universally(paragraph: str, all_subtopic_combinations: List[str]) -> Dict:
+    """
+    Uses Gemini to generate a relevance score (0.0 to 1.0) for a paragraph
+    against EVERY possible subtopic combination.
+    """
+    try:
+        topic_options_string = "\n".join(f"- {combo}" for combo in all_subtopic_combinations)
+
+        prompt = f"""
+        You are a highly precise document analysis system. Your task is to read a paragraph of
+        (maybe Hungarian) text and evaluate its relevance to a comprehensive list of topics
+        on a fine-grained, continuous scale.
+
+        TASK:
+        For the given PARAGRAPH, you MUST assign a relevance score from 0.00 to 1.00 for 
+        EVERY SINGLE topic combination in the provided list. Think carefully and provide
+        nuanced, non-rounded scores.
+
+        RULES:
+        1. Your response MUST be a single, valid JSON object and nothing else.
+        2. The JSON object must contain a single key: "scores".
+        3. The value of "scores" must be a dictionary where the keys EXACTLY MATCH the topic
+           combinations from the list, and the values are float numbers.
+        4. DO NOT round your scores. A score of 0.7 is acceptable, but a score of 0.73 is better.
+
+        EXAMPLE RESPONSE FORMAT (Note the non-rounded, continuous values):
+        {{
+          "scores": {{
+            "Anglia és Franciaország 10–15. században -> Évszámok": 0.95,
+            "Anglia és Franciaország 10–15. században -> Fogalmak, személyek": 0.88,
+            "A Karoling birodalom felbomlása... -> Évszámok": 0.0,
+            "A Karoling birodalom felbomlása... -> Eseménytört. kiegészítés": 0.12
+          }}
+        }}
+
+        PARAGRAPH TO SCORE:
+        ---
+        {paragraph}
+        ---
+
+        LIST OF ALL TOPIC COMBINATIONS TO SCORE AGAINST:
+        ---
+        {topic_options_string}
+        ---
+
+        YOUR JSON RESPONSE:
+        """
+        
+        genai.configure()
+        model = genai.GenerativeModel(constants.ORACLE_MODEL)
+        response = model.generate_content(prompt)
+        
+        cleaned_response = response.text.strip().replace("```json", "").replace("```", "")
+        result = json.loads(cleaned_response)
+        return result
+
+    except Exception as e:
+        print(f"An error occurred during scoring: {e}")
+        return {"scores": {}}
+
+if __name__ == "__main__":
+    with open(constants.TOPICS_FILE_PATH, 'r', encoding='utf-8') as f:
+        all_topics = json.load(f)['topics']
+    
+    all_subtopic_combinations = []
+    for topic in all_topics:
+        for sub_topic in topic['subTopics']:
+            all_subtopic_combinations.append(f"{topic['mainTopic']} -> {sub_topic}")
+
+    pdf_file_path = "data/3.Anglia és Franciaország 10–15. században .docx.pdf"
+    raw_text = get_raw_text_from_pdf(pdf_file_path)
+    paragraphs = split_text_into_paragraphs_with_gemini(raw_text)
+
+    scored_data_cache = load_cache(constants.TRAINING_DATASET_PATH)
+    
+    print(f"Starting universal paragraph scoring. Found {len(scored_data_cache)} items in cache.")
+    
+    for i, p in enumerate(paragraphs):
+        print(f"Processing paragraph {i+1}/{len(paragraphs)}...")
+        
+        if p in scored_data_cache:
+            print("  -> Cache HIT. Skipping.")
+            continue
+        
+        print("  -> Cache MISS. Scoring with Gemini API...")
+        scored_data = score_paragraph_universally(p, all_subtopic_combinations)
+        
+        if scored_data and scored_data.get('scores'):
+            scored_data_cache[p] = {
+                "text": p,
+                "scores": scored_data['scores']
+            }
+            save_cache(constants.TRAINING_DATASET_PATH, scored_data_cache)
+            print("  -> Successfully scored and saved to cache.")
+        else:
+            print("  -> Failed to score this paragraph.")
+            
+    print(f"\nScoring complete. The full dataset is at '{constants.TRAINING_DATASET_PATH}'")
+
+## utils\find_best_match.py ##
+﻿# ========================
+#     File not in use!    
+# ========================
+
+import json
+import google.generativeai as genai
+from typing import List, Dict, Any
+import numpy as np
+import os
+from dotenv import load_dotenv
+
+from paragraph_splitter import get_raw_text_from_pdf, split_text_into_paragraphs_with_gemini
+from generate_embeddings import generate_embeddings_with_gemini
+
+load_dotenv()
+GENERATED_QUERIES_CACHE_PATH = "data/generated_queries_cache.json"
+
+def load_cache(cache_path: str) -> Dict:
+    """Loads the generated queries cache file. Returns an empty dict if not found."""
+    if not os.path.exists(cache_path):
+        return {}
+    try:
+        with open(cache_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        print(f"Warning: Could not read or decode cache file at {cache_path}. Starting fresh.")
+        return {}
+
+def save_cache(cache_path: str, cache_data: Dict):
+    """Saves the cache data to the specified file."""
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    with open(cache_path, 'w', encoding='utf-8') as f:
+        json.dump(cache_data, f, ensure_ascii=False, indent=4)
+
+def generate_and_cache_all_queries(all_topic_definitions: List[Dict]) -> Dict:
+    """
+    Generates rich queries for all topic/subtopic pairs, using a cache to avoid re-generation.
+    """
+    print(f"\n--- Phase: Generating Rich Queries (using cache at '{GENERATED_QUERIES_CACHE_PATH}') ---")
+    cache = load_cache(GENERATED_QUERIES_CACHE_PATH)
+    
+    genai.configure()
+    model = genai.GenerativeModel('gemini-2.5-flash')
+
+    for topic_info in all_topic_definitions:
+        main_topic = topic_info.get('mainTopic')
+        if main_topic not in cache:
+            cache[main_topic] = {}
+
+        for sub_topic in topic_info.get('subTopics', []):
+            if sub_topic in cache[main_topic]:
+                print(f"Cache HIT for: '{main_topic}' -> '{sub_topic}'")
+                continue
+            
+            print(f"Cache MISS. Generating text for: '{main_topic}' -> '{sub_topic}'...")
+            prompt = f"""
+            You are a system that generates ideal example texts for search queries. 
+            Your only function is to output a single, well-written paragraph in Hungarian.
+
+            TASK:
+            Based on the provided TOPIC and SUBTOPIC, generate a single, detailed paragraph. 
+            This paragraph should be a perfect example of the kind of text a user would be thrilled 
+            to find when searching for the subtopic within the main topic.
+
+            TOPIC: "{main_topic}"
+            SUBTOPIC: "{sub_topic}"
+            
+            RULES:
+            - Your output MUST be the generated paragraph and nothing else.
+            - DO NOT write any explanation, introduction, or meta-commentary.
+            - The output must be written entirely in Hungarian.
+
+            OUTPUT THE PARAGRAPH NOW:
+            """
+            try:
+                response = model.generate_content(prompt)
+                generated_text = response.text.strip()
+                
+                cache[main_topic][sub_topic] = generated_text
+                save_cache(GENERATED_QUERIES_CACHE_PATH, cache) # Save progress immediately
+                print(f"Successfully generated and cached text.")
+
+            except Exception as e:
+                print(f"An error occurred during API call: {e}")
+
+    print("\n--- All rich queries are now generated and cached. ---")
+    return cache
+
+def find_best_match_for_query(
+    query_text: str, 
+    document_embeddings: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Finds the best matching document paragraph for a single, pre-generated query text."""
+    try:
+        query_embedding_result = genai.embed_content(
+            model='gemini-embedding-001',
+            content=query_text,
+            task_type="CLASSIFICATION"
+        )
+        query_vector = np.array(query_embedding_result['embedding'])
+    except Exception as e:
+        return {"error": f"Failed to generate query embedding: {e}"}
+
+    best_match = {"score": -1.0, "text": None}
+    for item in document_embeddings:
+        doc_vector = item['vector']
+        
+        dot_product = np.dot(query_vector, doc_vector)
+        norm_query = np.linalg.norm(query_vector)
+        norm_doc = np.linalg.norm(doc_vector)
+        similarity = dot_product / (norm_query * norm_doc)
+        
+        if similarity > best_match["score"]:
+            best_match["score"] = similarity
+            best_match["text"] = item["text"]
+            
+    return best_match
+
+if __name__ == "__main__":
+    pdf_file_path = "data/3.Anglia és Franciaország 10–15. században .docx.pdf"
+    print(f"--- Starting Full Pipeline for '{pdf_file_path}' ---")
+    raw_text = get_raw_text_from_pdf(pdf_file_path)
+    if not raw_text: exit("Exiting: Could not read PDF.")
+    
+    paragraphs = split_text_into_paragraphs_with_gemini(raw_text)
+    if not paragraphs: exit("Exiting: Could not split text into paragraphs.")
+
+    print("\n--- Phase: Generating Document Embeddings ---")
+    document_embeddings = generate_embeddings_with_gemini(
+        paragraphs, model_name='gemini-embedding-001'
+    )
+    if not document_embeddings: exit("Exiting: Could not generate document embeddings.")
+    print(f"\n--- Document Processing Complete. Found {len(document_embeddings)} embeddable paragraphs. ---")
+
+    json_path = "data/main_topics_subtopics.json"
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            topics_data = json.load(f)
+        all_topic_definitions = topics_data.get('topics', [])
+        if not all_topic_definitions: exit("Exiting: JSON file is empty or missing 'topics' key.")
+    except FileNotFoundError: exit(f"Exiting: JSON file not found at '{json_path}'")
+    except json.JSONDecodeError: exit(f"Exiting: Could not decode JSON. Check syntax.")
+
+    all_generated_queries = generate_and_cache_all_queries(all_topic_definitions)
+
+    print("\n\n--- Phase: Finding Best Matches for All Topics ---")
+    for main_topic, sub_topics_dict in all_generated_queries.items():
+        print(f"\n{'='*60}\nPROCESSING MAIN TOPIC: {main_topic}\n{'='*60}")
+        for sub_topic, query_text in sub_topics_dict.items():
+            print(f"\n--- Finding match for Subtopic: '{sub_topic}' ---")
+            print(f"Using cached query: \"{query_text}\"")
+            
+            result = find_best_match_for_query(query_text, document_embeddings)
+
+            if "error" in result:
+                print(f"An error occurred: {result['error']}")
+            else:
+                print(f"Best Matching Paragraph (Score: {result['score']:.4f}): '{result['text']}'")
+
+## utils\generate_embeddings.py ##
+﻿import google.generativeai as genai
+from typing import List, Dict, Any
+import numpy as np
+import os
+from dotenv import load_dotenv
+
+from paragraph_splitter import get_raw_text_from_pdf, split_text_into_paragraphs_with_gemini
+
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+load_dotenv()
+
+def generate_embeddings_with_gemini(
+    paragraphs: List[str], 
+    model_name: str = 'gemini-embedding-001'
+) -> List[Dict[str, Any]]:
+    """
+    Generates embedding vectors for a list of paragraphs using a Gemini model.
+
+    Args:
+        paragraphs: A list of text paragraphs.
+        model_name: The name of the Gemini embedding model to use.
+
+    Returns:
+        A list of dictionaries, where each dictionary contains the original
+        paragraph text and its corresponding numpy embedding vector.
+    """
+    if not paragraphs:
+        print("Cannot generate embeddings: The paragraph list is empty.")
+        return []
+    
+    print(f"Generating embeddings using Gemini model: '{model_name}'...")
+    try:
+        genai.configure()
+
+        result = genai.embed_content(
+            model=model_name,
+            content=paragraphs,
+            task_type="CLASSIFICATION"
+        )
+        
+        embeddings = result['embedding']
+
+        embedded_paragraphs = [
+            {
+                "text": para,
+                "vector": np.array(vec)
+            } for para, vec in zip(paragraphs, embeddings)
+        ]
+    
+        return embedded_paragraphs
+
+    except Exception as e:
+        print(f"An error occurred during Gemini embedding generation: {e}")
+        return []
+
+
+if __name__ == "__main__":
+    pdf_file_path = "data/3.Anglia és Franciaország 10–15. században .docx.pdf"
+        
+    print(f"1. Extracting raw text from '{pdf_file_path}'...")
+    raw_document_text = get_raw_text_from_pdf(pdf_file_path)
+
+    if not raw_document_text:
+        print("Could not proceed, raw text is empty.")
+    else:
+        print("2. Intelligently splitting text into paragraphs using Gemini...")
+        final_paragraphs = split_text_into_paragraphs_with_gemini(raw_document_text)
+
+        if not final_paragraphs:
+            print("Could not proceed, no paragraphs were generated.")
+        else:
+            print("\n3. Generating embedding vectors for the paragraphs using Gemini...")
+            embedding_data = generate_embeddings_with_gemini(final_paragraphs)
+
+            if embedding_data:
+                print("\n--- Embedding Generation Complete ---")
+                print(f"Successfully generated embeddings for {len(embedding_data)} paragraphs.")
+                
+                vector_dimension = len(embedding_data[0]['vector'])
+                print(f"Vector dimension: {vector_dimension}")
+
+                print("\nSample of the first embedded paragraph:")
+                print(f"Text: {embedding_data[0]['text']}")
+                print(f"Vector (first 5 elements): {embedding_data[0]['vector'][:5]}")
+            else:
+                print("Failed to generate embeddings.")
+
+## utils\paragraph_splitter.py ##
+﻿import os
+import pdfplumber
+import google.generativeai as genai
+
+from dotenv import load_dotenv
+from config import constants
+
+load_dotenv()
+
+def get_raw_text_from_pdf(pdf_path: str) -> str:
+    """
+    Extracts all text from a PDF into a single raw string.
+    
+    Args:
+        pdf_path: The path to the PDF file to be processed.
+
+    Returns:
+        The entire text content of the PDF as a single string.
+    """
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            full_text = " ".join(
+                page.extract_text(x_tolerance=1) #.replace('\n', ' ')
+                for page in pdf.pages if page.extract_text()
+            )
+        return full_text
+    except Exception as e:
+        print(f"Error reading PDF: {e}")
+        return ""
+
+def split_text_into_paragraphs_with_gemini(raw_text: str) -> list[str]:
+    """
+    Intelligently splits a raw text into paragraphs using the Gemini API.
+    
+    Args:
+        raw_text: The raw text to be processed.
+
+    Returns:
+        A list where each element is a semantically coherent paragraph.
+    """
+    if not raw_text:
+        print("The text to be processed is empty.")
+        return []
+
+    try:
+        genai.configure()
+        
+        model = genai.GenerativeModel(constants.PARAGRAPH_SPLITTER_MODEL)
+
+        prompt = f"""
+        You are a text processing expert specializing in making OCR-scanned, 
+        unstructured Hungarian documents readable.
+
+        TASK:
+        Break down the given raw text into logical, semantically coherent paragraphs.
+        The goal is to make the output a well-readable, structured text.
+
+        RULES:
+        1.  PRESERVE ORIGINAL TEXT: Do not change, rewrite, or omit anything!
+        2.  SEMANTIC GROUPING: Keep sentences belonging to the same train of thought together, 
+            even if they are separated by line breaks in the original text.
+        3.  HEADINGS AND LIST ITEMS: Treat headings (e.g., "Concept:", "battles:") and their associated 
+            short list items as a single logical block.
+        4.  Don't split the headings into a separated part!
+        5.  SPECIAL DELIMITER: Mark the end of each paragraph with a unique delimiter: |||---|||
+            DO NOT use a simple line break, only and exclusively this delimiter!
+
+        RAW TEXT:
+        ---
+        {raw_text}
+        ---
+        """
+
+        print("Sending text to Gemini API for processing...")
+        response = model.generate_content(prompt)
+        
+        cleaned_text = response.text
+        
+        paragraphs = [p.strip() for p in cleaned_text.split("|||---|||") if p.strip()]
+        
+        return paragraphs
+
+    except Exception as e:
+        print(f"Error during Gemini API call: {e}")
+        return []
+
+if __name__ == "__main__":
+
+    if True:
+        pdf_file_path = "data/3.Anglia és Franciaország 10–15. században .docx.pdf"
+        
+        print(f"1. Extracting raw text from '{pdf_file_path}'...")
+        raw_document_text = get_raw_text_from_pdf(pdf_file_path)
+
+        if raw_document_text:
+            print("2. Intelligently splitting text into paragraphs using Gemini...")
+            final_paragraphs = split_text_into_paragraphs_with_gemini(raw_document_text)
+            
+            if final_paragraphs:
+                print("\n--- Intelligently Split Paragraphs ---")
+                for i, para in enumerate(final_paragraphs, 1):
+                    print(f"[{i}] {para}\n")
+                print(f"A total of {len(final_paragraphs)} paragraphs were identified.")
+            else:
+                print("Failed to split text into paragraphs using the Gemini API.")
+
+## utils\train_student_model.py ##
+import json
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from typing import List, Dict
+import os
+
+from config import constants
+
+def prepare_data_for_training(labeled_data: List[Dict]) -> (np.ndarray, np.ndarray, List[str]):
+    """
+    Prepares the labeled JSON data for training by creating embeddings for the text
+    and structuring the scores as a numpy array.
+    """
+    import google.generativeai as genai
+    genai.configure()
+
+    texts = [item['text'] for item in labeled_data]
+    
+    topic_labels = sorted(labeled_data[0]['scores'].keys())
+    
+    score_vectors = []
+    for item in labeled_data:
+        ordered_scores = [item['scores'][label] for label in topic_labels]
+        score_vectors.append(ordered_scores)
+    
+    y_data = np.array(score_vectors)
+
+    print(f"Generating embeddings for {len(texts)} paragraphs...")
+    embedding_result = genai.embed_content(
+        model=constants.EMBEDDING_MODEL,
+        content=texts,
+        task_type=constants.EMBEDDING_TASK_FOR_TRAINING
+    )
+    X_data = np.array(embedding_result['embedding'])
+    
+    return X_data, y_data, topic_labels
+
+def build_and_train_model(X_train, y_train, X_val, y_val, output_labels: List[str]):
+    """
+    Defines, compiles, and trains the neural network.
+    """
+    input_shape = (X_train.shape[1],)
+    output_shape = y_train.shape[1]
+
+    model = tf.keras.Sequential([
+        tf.keras.layers.InputLayer(input_shape=input_shape),
+        tf.keras.layers.Dense(256, activation='relu'),
+        tf.keras.layers.Dropout(0.3),
+        tf.keras.layers.Dense(128, activation='relu'),
+        tf.keras.layers.Dense(output_shape, activation='sigmoid')
+    ])
+
+    model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
+    
+    model.summary()
+    
+    print("\nStarting model training...")
+    history = model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=50,
+        batch_size=32,
+        callbacks=[tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)]
+    )
+
+    print("\nTraining complete. Saving model...")
+    model.save(constants.STUDENT_MODEL_PATH)
+    with open(constants.STUDENT_MODEL_LABELS_PATH, 'w', encoding='utf-8') as f:
+        json.dump(output_labels, f)
+
+    return model
+
+if __name__ == "__main__":
+    try:
+        with open(constants.TRAINING_DATASET_PATH, 'r', encoding='utf-8') as f:
+            dataset = json.load(f)
+    except FileNotFoundError:
+        exit(f"Error: Labeled data not found at '{constants.TRAINING_DATASET_PATH}'. Please run the data generation script first.")
+
+    if not dataset:
+        exit("Error: The dataset is empty. Cannot train the model.")
+
+    X_embeddings, y_scores, labels = prepare_data_for_training(dataset)
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_embeddings, y_scores, test_size=0.2, random_state=42
+    )
+
+    trained_model = build_and_train_model(X_train, y_train, X_val, y_val, labels)
+    print(f"\nModel and labels successfully saved to the '{constants.MODELS_DIR}' directory.")
+
+## utils\universal_parser.py ##
+import os
+from typing import List
+import pdfplumber
+from docx import Document
+from pptx import Presentation
+
+from utils.paragraph_splitter import split_text_into_paragraphs_with_gemini
+
+def _get_paragraphs_from_pdf(file_path: str) -> List[str]:
+    """Extracts raw text from a PDF and uses Gemini to split it into paragraphs."""
+    print(f"  -> Using PDF method with Gemini splitter...")
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            raw_text = " ".join(
+                page.extract_text(x_tolerance=1).replace('\n', ' ')
+                for page in pdf.pages if page.extract_text()
+            )
+        return split_text_into_paragraphs_with_gemini(raw_text)
+    except Exception as e:
+        print(f"    -> Error processing PDF {file_path}: {e}")
+        return []
+
+def _get_paragraphs_from_docx(file_path: str) -> List[str]:
+    """Extracts paragraphs directly from a .docx file's structure."""
+    print("  -> Using DOCX method (direct structure read)...")
+    try:
+        doc = Document(file_path)
+        return [p.text for p in doc.paragraphs if p.text.strip()]
+    except Exception as e:
+        print(f"    -> Error processing DOCX {file_path}: {e}")
+        return []
+
+def _get_paragraphs_from_pptx(file_path: str) -> List[str]:
+    """Extracts text from each slide of a .pptx file. Each slide becomes one 'paragraph'."""
+    print("  -> Using PPTX method (one text chunk per slide)...")
+    try:
+        prs = Presentation(file_path)
+        slide_texts = []
+        for slide in prs.slides:
+            text_runs = []
+            for shape in slide.shapes:
+                if not shape.has_text_frame:
+                    continue
+                for paragraph in shape.text_frame.paragraphs:
+                    for run in paragraph.runs:
+                        text_runs.append(run.text)
+            if text_runs:
+                slide_texts.append(" ".join(text_runs))
+        return slide_texts
+    except Exception as e:
+        print(f"    -> Error processing PPTX {file_path}: {e}")
+        return []
+
+def extract_paragraphs_from_file(file_path: str) -> List[str]:
+    """
+    Universally extracts paragraphs from PDF, DOCX, or PPTX files.
+
+    This function acts as a dispatcher, checking the file extension and
+    calling the appropriate specialized function to handle the file type.
+
+    Args:
+        file_path: The full path to the file.
+
+    Returns:
+        A list of strings, where each string is a paragraph or a
+        logical chunk of text from the document.
+    """
+    if not os.path.exists(file_path):
+        print(f"File not found: {file_path}")
+        return []
+
+    _, extension = os.path.splitext(file_path)
+    extension = extension.lower()
+    
+    print(f"\nProcessing file: '{os.path.basename(file_path)}'")
+
+    if extension == '.pdf':
+        return _get_paragraphs_from_pdf(file_path)
+    elif extension == '.docx':
+        return _get_paragraphs_from_docx(file_path)
+    elif extension == '.pptx':
+        return _get_paragraphs_from_pptx(file_path)
+    else:
+        print(f"  -> Unsupported file type: '{extension}'. Skipping.")
+        return []
+
+if __name__ == "__main__":
+    files_to_process = [
+        "data/content/Jagellók.docx"
+    ]
+
+    all_extracted_content = {}
+    for file in files_to_process:
+        paragraphs = extract_paragraphs_from_file(file)
+        if paragraphs:
+            all_extracted_content[file] = paragraphs
+            print(f"  -> Successfully extracted {len(paragraphs)} paragraph(s).")
+            print(f"  -> Sample: '{paragraphs}'")
+
+    print("\n--- Universal Parser Demonstration Complete ---")

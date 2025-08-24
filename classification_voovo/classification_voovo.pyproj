@@ -4,7 +4,7 @@
     <SchemaVersion>2.0</SchemaVersion>
     <ProjectGuid>09874d3a-5997-4650-b209-e9f903ae509c</ProjectGuid>
     <ProjectHome>.</ProjectHome>
-    <StartupFile>utils\active_learning_pipeline.py</StartupFile>
+    <StartupFile>main.py</StartupFile>
     <SearchPath>
     </SearchPath>
     <WorkingDirectory>.</WorkingDirectory>
@@ -21,6 +21,8 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="config\constants.py" />
+    <Compile Include="config\__main__.py" />
     <Compile Include="main.py" />
     <Compile Include="utils\active_learning_pipeline.py" />
     <Compile Include="utils\create_training_data.py" />
@@ -33,6 +35,7 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="data\" />
+    <Folder Include="config\" />
     <Folder Include="utils\" />
   </ItemGroup>
   <ItemGroup>

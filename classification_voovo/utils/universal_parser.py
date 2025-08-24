@@ -4,24 +4,27 @@ import pdfplumber
 from docx import Document
 from pptx import Presentation
 
-from paragraph_splitter import split_text_into_paragraphs_with_gemini
+from utils.paragraph_splitter import split_text_into_paragraphs_with_gemini_async
 
-def _get_paragraphs_from_pdf(file_path: str) -> List[str]:
-    """Extracts raw text from a PDF and uses Gemini to split it into paragraphs."""
+async def _get_paragraphs_from_pdf_async(file_path: str) -> List[str]:
+    """Extracts raw text from a PDF and uses Gemini to split it into paragraphs, asynchronously."""
     print(f"  -> Using PDF method with Gemini splitter...")
     try:
+        # pdfplumber is sync, which is fine
         with pdfplumber.open(file_path) as pdf:
             raw_text = " ".join(
                 page.extract_text(x_tolerance=1).replace('\n', ' ')
                 for page in pdf.pages if page.extract_text()
             )
-        return split_text_into_paragraphs_with_gemini(raw_text)
+        # The API call part is async
+        return await split_text_into_paragraphs_with_gemini_async(raw_text)
     except Exception as e:
         print(f"    -> Error processing PDF {file_path}: {e}")
         return []
 
 def _get_paragraphs_from_docx(file_path: str) -> List[str]:
     """Extracts paragraphs directly from a .docx file's structure."""
+    # ... (This function remains synchronous)
     print("  -> Using DOCX method (direct structure read)...")
     try:
         doc = Document(file_path)
@@ -32,6 +35,7 @@ def _get_paragraphs_from_docx(file_path: str) -> List[str]:
 
 def _get_paragraphs_from_pptx(file_path: str) -> List[str]:
     """Extracts text from each slide of a .pptx file. Each slide becomes one 'paragraph'."""
+    # ... (This function remains synchronous)
     print("  -> Using PPTX method (one text chunk per slide)...")
     try:
         prs = Presentation(file_path)
@@ -51,19 +55,9 @@ def _get_paragraphs_from_pptx(file_path: str) -> List[str]:
         print(f"    -> Error processing PPTX {file_path}: {e}")
         return []
 
-def extract_paragraphs_from_file(file_path: str) -> List[str]:
+async def extract_paragraphs_from_file_async(file_path: str) -> List[str]:
     """
-    Universally extracts paragraphs from PDF, DOCX, or PPTX files.
-
-    This function acts as a dispatcher, checking the file extension and
-    calling the appropriate specialized function to handle the file type.
-
-    Args:
-        file_path: The full path to the file.
-
-    Returns:
-        A list of strings, where each string is a paragraph or a
-        logical chunk of text from the document.
+    Universally extracts paragraphs from PDF, DOCX, or PPTX files, using async for PDFs.
     """
     if not os.path.exists(file_path):
         print(f"File not found: {file_path}")
@@ -75,7 +69,7 @@ def extract_paragraphs_from_file(file_path: str) -> List[str]:
     print(f"\nProcessing file: '{os.path.basename(file_path)}'")
 
     if extension == '.pdf':
-        return _get_paragraphs_from_pdf(file_path)
+        return await _get_paragraphs_from_pdf_async(file_path)
     elif extension == '.docx':
         return _get_paragraphs_from_docx(file_path)
     elif extension == '.pptx':
@@ -84,17 +78,5 @@ def extract_paragraphs_from_file(file_path: str) -> List[str]:
         print(f"  -> Unsupported file type: '{extension}'. Skipping.")
         return []
 
-if __name__ == "__main__":
-    files_to_process = [
-        "data/content/Jagellók.docx"
-    ]
-
-    all_extracted_content = {}
-    for file in files_to_process:
-        paragraphs = extract_paragraphs_from_file(file)
-        if paragraphs:
-            all_extracted_content[file] = paragraphs
-            print(f"  -> Successfully extracted {len(paragraphs)} paragraph(s).")
-            print(f"  -> Sample: '{paragraphs}'")
-
-    print("\n--- Universal Parser Demonstration Complete ---")
+# The __main__ block for this file is omitted for brevity, as it's a library file.
+# If testing is needed, it should be converted to async like the others.
