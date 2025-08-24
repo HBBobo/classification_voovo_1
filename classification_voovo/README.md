@@ -1,65 +1,76 @@
-# Active Learning Document Classifier
+ï»¿# Active Learning Document Classifier
 
-Ez a projekt egy intelligens dokumentum-osztályozó rendszer, amely az aktív tanulás (Active Learning) módszerét alkalmazza. A célja, hogy különbözõ formátumú (PDF, DOCX, PPTX) dokumentumokból kinyert szöveges bekezdéseket automatikusan, elõre definiált témák szerint kategorizálja, miközben minimalizálja a költséges API hívások számát.
+Ez a projekt egy intelligens dokumentum-osztÃ¡lyozÃ³ rendszer, amely az aktÃ­v tanulÃ¡s (Active Learning) mÃ³dszerÃ©t alkalmazza. A cÃ©lja, hogy kÃ¼lÃ¶nbÃ¶zÅ‘ formÃ¡tumÃº (PDF, DOCX, PPTX) dokumentumokbÃ³l kinyert szÃ¶veges bekezdÃ©seket automatikusan, elÅ‘re definiÃ¡lt tÃ©mÃ¡k szerint kategorizÃ¡lja, mikÃ¶zben minimalizÃ¡lja a kÃ¶ltsÃ©ges API hÃ­vÃ¡sok szÃ¡mÃ¡t.
 
-## Fõbb Jellemzõk
+## FÅ‘bb JellemzÅ‘k
 
--   **Aktív Tanulási Ciklus:** A rendszer egy gyors, helyi "diák" (Student) neurális hálót és egy nagy teljesítményû "orákulum" (Oracle - Google Gemini API) modellt használ. Csak akkor fordul a drága orákulumhoz, ha a diák modell bizonytalan, majd az így kapott új tudással dinamikusan újratanítja a diákot.
--   **Dinamikus Újratanítás:** A diák modell a futás közben, 25-ös csomagokban (`RETRAIN_TRIGGER_COUNT`) gyûjtött új adatokból automatikusan újratanul, így folyamatosan okosabbá és magabiztosabbá válik.
--   **Párhuzamos API Hívások:** Az aszinkron feldolgozásnak köszönhetõen a rendszer képes egyszerre több API kérést is elküldeni, jelentõsen csökkentve a várakozási idõt.
--   **Univerzális Dokumentumfeldolgozás:** Képes `.pdf`, `.docx`, és `.pptx` fájlok szöveges tartalmának kinyerésére és intelligens bekezdésekre bontására.
--   **Központosított Konfiguráció:** Minden fontos paraméter (modellnevek, elérési utak, küszöbértékek) egyetlen helyen, a `config/constants.py` fájlban módosítható.
+-   **AktÃ­v TanulÃ¡si Ciklus:** A rendszer egy gyors, helyi "diÃ¡k" (Student) neurÃ¡lis hÃ¡lÃ³t Ã©s egy nagy teljesÃ­tmÃ©nyÅ± "orÃ¡kulum" (Oracle - Google Gemini API) modellt hasznÃ¡l. Csak akkor fordul a drÃ¡ga orÃ¡kulumhoz, ha a diÃ¡k modell bizonytalan, majd az Ã­gy kapott Ãºj tudÃ¡ssal dinamikusan ÃºjratanÃ­tja a diÃ¡kot.
+-   **Dinamikus ÃšjratanÃ­tÃ¡s:** A diÃ¡k modell a futÃ¡s kÃ¶zben, 25-Ã¶s csomagokban (`RETRAIN_TRIGGER_COUNT`) gyÅ±jtÃ¶tt Ãºj adatokbÃ³l automatikusan Ãºjratanul, Ã­gy folyamatosan okosabbÃ¡ Ã©s magabiztosabbÃ¡ vÃ¡lik.
+-   **PÃ¡rhuzamos API HÃ­vÃ¡sok:** Az aszinkron feldolgozÃ¡snak kÃ¶szÃ¶nhetÅ‘en a rendszer kÃ©pes egyszerre tÃ¶bb API kÃ©rÃ©st is elkÃ¼ldeni, jelentÅ‘sen csÃ¶kkentve a vÃ¡rakozÃ¡si idÅ‘t.
+-   **UniverzÃ¡lis DokumentumfeldolgozÃ¡s:** KÃ©pes `.pdf`, `.docx`, Ã©s `.pptx` fÃ¡jlok szÃ¶veges tartalmÃ¡nak kinyerÃ©sÃ©re Ã©s intelligens bekezdÃ©sekre bontÃ¡sÃ¡ra.
+-   **KÃ¶zpontosÃ­tott KonfigurÃ¡ciÃ³:** Minden fontos paramÃ©ter (modellnevek, elÃ©rÃ©si utak, kÃ¼szÃ¶bÃ©rtÃ©kek) egyetlen helyen, a `config/constants.py` fÃ¡jlban mÃ³dosÃ­thatÃ³.
 
-## A Rendszer Mûködése
+## A Rendszer MÅ±kÃ¶dÃ©se
 
-A projekt lelke a "diák-orákulum" modell. A diák egy kicsi, gyors neurális háló, ami a helyi gépen fut. Az orákulum a nagy teljesítményû Gemini Pro modell. A cél, hogy a diák a lehetõ legtöbb munkát elvégezze, és csak akkor kérjen segítséget a "bölcs" orákulumtól, ha abszolút szükséges. A folyamat a következõképpen néz ki:
+A projekt lelke a "diÃ¡k-orÃ¡kulum" modell. A diÃ¡k egy kicsi, gyors neurÃ¡lis hÃ¡lÃ³, ami a helyi gÃ©pen fut. Az orÃ¡kulum a nagy teljesÃ­tmÃ©nyÅ± Gemini Pro modell. A cÃ©l, hogy a diÃ¡k a lehetÅ‘ legtÃ¶bb munkÃ¡t elvÃ©gezze, Ã©s csak akkor kÃ©rjen segÃ­tsÃ©get a "bÃ¶lcs" orÃ¡kulumtÃ³l, ha abszolÃºt szÃ¼ksÃ©ges. A folyamat a kÃ¶vetkezÅ‘kÃ©ppen nÃ©z ki:
 
-### Folyamatábra
+### FolyamatÃ¡bra
 
-*(Megjegyzés: A lenti diagram megjelenítéséhez olyan Markdown-megjelenítõ szükséges, amely támogatja a Mermaid.js szintaxist, mint például a GitHub.)*
+*(MegjegyzÃ©s: A lenti diagram megjelenÃ­tÃ©sÃ©hez olyan Markdown-megjelenÃ­tÅ‘ szÃ¼ksÃ©ges, amely tÃ¡mogatja a Mermaid.js szintaxist, mint pÃ©ldÃ¡ul a GitHub.)*
 
 ```mermaid
 graph TD
-    A[Start] --> B[Dokumentumok beolvasása, bekezdések kinyerése];
+    A[Start] --> B[Dokumentumok beolvasÃ¡sa, bekezdÃ©sek kinyerÃ©se];
     B --> C{For each Paragraph};
     C --> D{Benne van az Oracle Cache-ben?};
-    D -- Igen --> E[Gyorsítótárazott pontszámok használata];
-    E --> Z[Következõ bekezdés];
+    D -- Igen --> E[GyorsÃ­tÃ³tÃ¡razott pontszÃ¡mok hasznÃ¡lata];
+    E --> Z[KÃ¶vetkezÅ‘ bekezdÃ©s];
 
-    D -- Nem --> F{Létezik Student modell?};
-    F -- Nem --> G[Hozzáadás az Oracle Várólistához];
+    D -- Nem --> F{LÃ©tezik Student modell?};
+    F -- Nem --> G[HozzÃ¡adÃ¡s az Oracle VÃ¡rÃ³listÃ¡hoz];
 
-    F -- Igen --> H[Predikció a Student modellel];
+    F -- Igen --> H[PredikciÃ³ a Student modellel];
     H --> I{"A Student magabiztos? (>= 0.85)"};
-    I -- Igen --> J[Student pontszámainak használata];
+    I -- Igen --> J[Student pontszÃ¡mainak hasznÃ¡lata];
     J --> Z;
     I -- Nem --> G;
 
-    G --> K{"Várólista mérete >= 25?"};
+    G --> K{"VÃ¡rÃ³lista mÃ©rete >= 25?"};
     K -- Nem --> Z;
 
     K -- Igen --> L;
     
-    subgraph L [Batch Feldolgozás és Tanítás]
-        M[Párhuzamos API hívás a 25 bekezdésre]
-        M --> N[Új címkék mentése a Cache-be]
-        N --> O[Teljes Cache betöltése]
-        O --> P[Student Modell Újratanítása]
-        P --> Q[Új modell betöltése a memóriába]
+    subgraph L [Batch FeldolgozÃ¡s Ã©s TanÃ­tÃ¡s]
+        M[PÃ¡rhuzamos API hÃ­vÃ¡s a 25 bekezdÃ©sre]
+        M --> N[Ãšj cÃ­mkÃ©k mentÃ©se a Cache-be]
+        N --> O[Teljes Cache betÃ¶ltÃ©se]
+        O --> P[Student Modell ÃšjratanÃ­tÃ¡sa]
+        P --> Q[Ãšj modell betÃ¶ltÃ©se a memÃ³riÃ¡ba]
     end
 
-    L --> R[Várólista kiürítése];
+    L --> R[VÃ¡rÃ³lista kiÃ¼rÃ­tÃ©se];
     R --> Z;
 
-    C -- Nincs több bekezdés --> S{Maradt valami a Várólistán?};
-    S -- Igen --> T[Maradék Batch Feldolgozása és Tanítás];
-    T --> U[Végeredmények mentése JSON-be];
+    C -- Nincs tÃ¶bb bekezdÃ©s --> S{Maradt valami a VÃ¡rÃ³listÃ¡n?};
+    S -- Igen --> T[MaradÃ©k Batch FeldolgozÃ¡sa Ã©s TanÃ­tÃ¡s];
+    T --> U[VÃ©geredmÃ©nyek mentÃ©se JSON-be];
     S -- Nem --> U;
     U --> V[End];
 ```
+## FÃ¡jlstruktÃºra
 
-**BEFORE THE FIRST RUN:**
-To run the code, you need to install the required libraries. You can do this by running the following command in your terminal or command prompt:
-```bash
-pip install pdfplumber python-docx python-pptx tensorflow scikit-learn scipy
-```
+.
+â”œâ”€â”€ config/
+â”‚   â””â”€â”€ constants.py         # KÃ¶zponti konfigurÃ¡ciÃ³s fÃ¡jl
+â”œâ”€â”€ data/
+â”‚   â””â”€â”€ content/             # Ide kerÃ¼lnek a feldolgozandÃ³ dokumentumok
+â”‚   â””â”€â”€ main_topics_subtopics.json # A lehetsÃ©ges kategÃ³riÃ¡k listÃ¡ja
+â”œâ”€â”€ models/                  # Ide menti a rendszer a tanÃ­tott diÃ¡k modellt
+â”œâ”€â”€ utils/
+â”‚   â”œâ”€â”€ active_learning_pipeline.py # A fÅ‘ feldolgozÃ¡si logika
+â”‚   â”œâ”€â”€ create_training_data.py   # Szkript a kezdeti tanÃ­tÃ³adatbÃ¡zis generÃ¡lÃ¡sÃ¡ra
+â”‚   â”œâ”€â”€ train_student_model.py    # Szkript az elsÅ‘ diÃ¡k modell betanÃ­tÃ¡sÃ¡ra
+â”‚   â””â”€â”€ ...                  # TovÃ¡bbi segÃ©dmodulok
+â”œâ”€â”€ main.py                  # A program indÃ­tÃ³fÃ¡jlja
+â”œâ”€â”€ .env                     # API kulcs Ã©s egyÃ©b kÃ¶rnyezeti vÃ¡ltozÃ³k helye
+â””â”€â”€ requirements.txt         # SzÃ¼ksÃ©ges Python csomagok listÃ¡ja
