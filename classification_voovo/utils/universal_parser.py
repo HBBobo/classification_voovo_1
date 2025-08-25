@@ -35,7 +35,6 @@ def _get_paragraphs_from_docx(file_path: str) -> List[str]:
 
 def _get_paragraphs_from_pptx(file_path: str) -> List[str]:
     """Extracts text from each slide of a .pptx file. Each slide becomes one 'paragraph'."""
-    # ... (This function remains synchronous)
     print("  -> Using PPTX method (one text chunk per slide)...")
     try:
         prs = Presentation(file_path)
@@ -48,8 +47,10 @@ def _get_paragraphs_from_pptx(file_path: str) -> List[str]:
                 for paragraph in shape.text_frame.paragraphs:
                     for run in paragraph.runs:
                         text_runs.append(run.text)
-            if text_runs:
-                slide_texts.append(" ".join(text_runs))
+            
+            slide_text = " ".join(text_runs).strip()
+            if slide_text:
+                slide_texts.append(slide_text)
         return slide_texts
     except Exception as e:
         print(f"    -> Error processing PPTX {file_path}: {e}")

@@ -5,7 +5,7 @@ import os
 # Base directories
 DATA_DIR = "data"
 MODELS_DIR = "models"
-INPUT_DOCUMENT_FOLDER = os.path.join(DATA_DIR, "content")
+INPUT_DOCUMENT_FOLDER = os.path.join(DATA_DIR, "content+")
 
 # Data and result files
 TOPICS_FILE_PATH = os.path.join(DATA_DIR, "main_topics_subtopics.json")

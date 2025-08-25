@@ -39,6 +39,7 @@
     <Folder Include="utils\" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include=".env" />
     <Content Include="data\3.Anglia és Franciaország 10–15. században .docx.pdf" />
     <Content Include="README.md" />
     <Content Include="requirements.txt" />
